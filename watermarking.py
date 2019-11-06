@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import pywt
+from pylfsr import LFSR
 
 def bgr2hsv(img):
     img_hsv = np.copy(img)
@@ -21,34 +22,6 @@ def dct(img):
 def idct(img_dct):
     return cv2.idct(img_dct)
 
-def dwt(img):
-    lena_dct = dct(img)
-
-    lena_idct = np.copy(lena_dct)
-    lena_idct[0:256,0:256] = cv2.idct(lena_idct[0:256,0:256])
-    lena_idct[0:256,256:512] = cv2.idct(lena_idct[0:256,256:512])
-    lena_idct[256:512,0:256] = cv2.idct(lena_idct[256:512,0:256])
-    lena_idct[256:512,256:512] = cv2.idct(lena_idct[256:512,256:512])
-
-    lena_idct[0:256,0:256] = cv2.dct(lena_idct[0:256,0:256])
-    lena_idct[0:128,0:128] = cv2.idct(lena_idct[0:128,0:128])
-    lena_idct[0:128,128:256] = cv2.idct(lena_idct[0:128,128:256])
-    lena_idct[128:256,0:128] = cv2.idct(lena_idct[128:256,0:128])
-    lena_idct[128:256,128:256] = cv2.idct(lena_idct[128:256,128:256])
-    return lena_idct
-
-def idwt(img):
-    result = np.copy(img)
-    result[0:128,0:128] = dct(img[0:128,0:128])
-    result[0:128,128:256] = dct(img[0:128,128:256])
-    result[128:256,0:128] = dct(img[128:256,0:128])
-    result[128:256,128:256] = dct(img[128:256,128:256])
-
-    result[0:256,256:512] = dct(img[0:256,256:512])
-    result[256:512,0:256] = dct(img[256:512,0:256])
-    result[256:512,256:512] = dct(img[256:512,256:512])
-    return result
-
 def true_dwt(img):
     img_dwt = np.copy(img)
     img_dwt = np.float32(img_dwt)/255.0
@@ -63,23 +36,72 @@ def true_idwt(img):
     (LL, (LH, HL, HH)) = (img[0:img.shape[0]//2, 0:img.shape[0]//2], (img[0:img.shape[0]//2, img.shape[0]//2:img.shape[0]], img[img.shape[0]//2:img.shape[0], 0:img.shape[0]//2], img[img.shape[0]//2:img.shape[0], img.shape[0]//2:img.shape[0]]))
     return pywt.idwt2((LL, (LH, HL, HH)), 'haar')
 
+def text_to_bits(text, encoding='utf-8', errors='surrogatepass'):
+    Nmax_bit = 1024
+    bits = bin(int.from_bytes(text.encode(encoding, errors), 'big'))[2:]
+    bits = bits.zfill(8 * ((len(bits) + 7) // 8))
+    while(len(bits)<Nmax_bit):
+        bits += '00100000'
+    return bits
+
+def text_from_bits(bits, encoding='utf-8', errors='surrogatepass'):
+    n = int(bits, 2)
+    return n.to_bytes((n.bit_length() + 7) // 8, 'big').decode(encoding, errors) or '\0'
+
+def xor1(bin_message, seq):
+    # On suppose taille de bin_message est de 1024bits et seq de 4096 bits
+    # Chaque bit de bin_message sera transformé en 4 bits avec un xor avec seq
+    watermark = ''
+    for i in range(len(bin_message)):
+        it = 0
+        while it < 4:
+            if (bin_message[i] == '0' and seq[4*i+it]=='0') or (bin_message[i] == '1' and seq[4*i+it]=='1'):
+                watermark += '0'
+            else:
+                watermark += '1'
+            it += 1
+    return watermark
+
+def xor2(watermark, seq):
+    extracted_mess = ''
+    for i in range(len(watermark)):
+        if (watermark[i] == '0' and seq[i]=='0') or (watermark[i] == '1' and seq[i]=='1'):
+            extracted_mess += '0'
+        else:
+            extracted_mess += '1'
+    extracted_mess = [extracted_mess[i] for i in range(0,len(extracted_mess),4)]
+    extracted_mess = ''.join(extracted_mess)
+    return extracted_mess
+
 img = cv2.imread("pepper.bmp") #### Put a 0 after for dct or convert to grayscale
 img_hsv = bgr2hsv(img)
 img_dwt = true_dwt(img_hsv[:,:,-1])
 img_dwt[0:256,0:256] = true_dwt(img_dwt[0:256,0:256]*255.0)
-#img_dwt[0:128,0:128] = true_dwt(img_dwt[0:128,0:128]*255.0)
+img_dwt[0:128,0:128] = true_dwt(img_dwt[0:128,0:128]*255.0)
+
+"""----Generate the watermark for a message----------"""
+alpha = 0.01
+fc = 64
+fpoly = [13,4,3,1]
+message = "Le Cyrano, Versailles, France - 31/10/2019 - 20h00"
+
+L = LFSR(fpoly=fpoly, initstate='random', verbose=False)
+L.runKCycle(4096)
+seq = L.seq
+string_seq = [str(x) for x in seq]
+string_seq = ''.join(string_seq)
+
+bin_message = text_to_bits(message)
+watermark = xor1(bin_message,string_seq)
+watermark = np.array([int(x) for x in watermark]).reshape((fc,fc))
 
 """--------Spread Spectrum-------------"""
-alpha = 0.01
-fc = 128
-watermark = np.random.rand(fc,fc)
-watermark[0,0] = 0
 
 img_dwt_marked = np.copy(img_dwt)
 img_dwt_marked[:fc,:fc] = img_dwt_marked[:fc,:fc] * (1 + alpha * watermark)
 
 img_marked = np.copy(img_dwt_marked)
-#img_marked[0:128,0:128] = true_idwt(img_marked[0:128,0:128])
+img_marked[0:128,0:128] = true_idwt(img_marked[0:128,0:128])
 img_marked[0:256,0:256] = true_idwt(img_marked[0:256,0:256])
 img_marked = true_idwt(img_marked)
 
